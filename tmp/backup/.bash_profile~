@@ -1,0 +1,132 @@
+# TMUX: auto setup tmux session when log in
+if which tmux >/dev/null 2>&1; then
+	#if not inside a tmux session, and if no session is started, start a new session
+	test -z "$TMUX" && (tmux attach || tmux new-session)
+fi
+
+# add ~/.profile (rvm)
+source ~/.profile
+
+
+### some aliases
+alias hk='vim ~/.bash_profile'
+
+alias so='. ~/.bash_profile'
+
+alias nb='Jupyter notebook'
+
+alias nmodel='cd ~/IPython_notebook/predictive-model/ipython/New_model-Ziyue_Li/'
+
+alias model='cd ~/IPython_notebook/predictive-model/'
+
+
+
+### Automation - Ipythonbatchjob
+ipyjob () {
+	export FILE_NAME=$1
+	export BATCH_ID=$2
+	export MODE=$3
+	runipy ~/IPython_notebook/predictive-model/ipython/New_model-Ziyue_Li/Acxiom_targetModel_POC_Ziyue_Li.ipynb ~/IPython_notebook/output/ipynb_report_html/${FILE_NAME}${BATCH_ID}.ipynb
+	export timestamp=$(date +"_%Y%m_%H%M")
+	# add timestamp to scored csv
+	mv ~/IPython_notebook/output/scored_csv_files/scored_${FILE_NAME}${BATCH_ID}.csv ~/IPython_notebook/output/scored_csv_files/scored_${FILE_NAME}${BATCH_ID}${timestamp}.csv
+	# generate html report
+	jupyter nbconvert --to html ~/IPython_notebook/output/ipynb_report_html/${FILE_NAME}${BATCH_ID}.ipynb
+	mv ~/IPython_notebook/output/ipynb_report_html/${FILE_NAME}${BATCH_ID}.html ~/IPython_notebook/output/ipynb_report_html/${FILE_NAME}${BATCH_ID}${timestamp}.html
+	# in production mode, upload the csv file and  html report
+	if [ "$MODE" = "production" ]
+	then
+		aws s3 cp ~/IPython_notebook/output/ipynb_report_html/${FILE_NAME}${BATCH_ID}${timestamp}.html s3://predictive-model/datafiles/output/New_model_Li/ipynb_report_html/${FILE_NAME}${BATCH_ID}${timestamp}.html
+		aws s3 cp ~/IPython_notebook/output/scored_csv_files/scored_${FILE_NAME}${BATCH_ID}${timestamp}.csv s3://predictive-model/datafiles/output/New_model_Li/scored_csv_files/scored_${FILE_NAME}${BATCH_ID}${timestamp}.csv
+	fi
+	# delete the generated ipynb
+	rm ~/IPython_notebook/output/ipynb_report_html/${FILE_NAME}${BATCH_ID}.ipynb
+}
+
+batchloop () {
+	export BATCH_ID=$2
+	for f in $1
+	do
+		ipyjob $f $BATCH_ID "production"
+	done
+}
+
+# ipybatchjob still needs to be tested
+ipybatchjob () {
+	cd ~/IPython_notebook/predictive-model/ipython/New_model-Ziyue_Li/
+	python ipybatchjob.py "$1" "$2"
+}
+
+
+
+### Automation - Get Axiom data, decryt, unzip and upload to s3
+makefolder_name() {
+	# grab the current month in numerical form (e.g. "07")
+	month=$(date -d "$D" '+%m')
+	year=$(date +"%Y")
+	# attach to the folder name and create this folder
+	folder_name='IBX_Consumer_File_Install_'$year$month
+	echo $folder_name
+}
+
+pdownload() {
+	folder_name=$(makefolder_name)
+	cd ~/download/$folder_name/pgpfiles
+	passphrase='1h0#Rh1q'
+	lftp -p 22 -u yrh466,$passphrase sftp://esftpo.acxiom.com -e 'mirror ./ -P 24 --use-pget-n=10;exit'
+	cd ~/download/$folder_name
+}
+
+# this function should be executed in pgpfiles folder
+generatecsv() {
+	f=$1
+	file_name=$(echo $f| cut -d '.' -f 1)
+	echo "Processing $f file..."
+	# grab the current month in numerical form (e.g. "07")
+	month=$(date -d "$D" '+%m')
+	year=$(date +"%Y")
+	# attach to the folder name and create this folder
+	folder_name='IBX_Consumer_File_Install_'$year$month
+	gpg --import ~/ftp-key.asc
+	gpg -v --decrypt --passphrase Firstle@ds1 $f > ~/download/$folder_name/zipfiles/$file_name.zip
+	echo "Start unzipping $f file..."
+	cd ~/download/$folder_name/zipfiles/
+	pwd
+	unzip ~/download/$folder_name/zipfiles/$file_name.zip
+	rename unzipped files to csv and put in csvfiles folder
+	mv $file_name ~/download/$folder_name/csvfiles/$file_name.csv
+}
+
+# this goes into pgpfiles folder
+pcsv() {
+	folder_name=$(makefolder_name)
+	cd ~/download/$folder_name/pgpfiles
+	export -f generatecsv
+	parallel -j0 -k generatecsv ::: *.pgp
+	# for f in *.pgp; do generatecsv "$f" & done
+	# find . -name '*.pgp' -print0 | xargs -0 -I {} -P 15 generatecsv {}
+}
+
+# upload to s3
+s3upload() {
+	folder_name=$(makefolder_name)
+	# remove zipfiles folder
+	echo 'Removing zipfiles folder'
+	rm -r ~/download/$folder_name/zipfiles/
+	cd ~/download/
+	echo 'Start uploading to s3'
+	aws s3 sync . s3://acxiom-sftp
+}
+
+axiom() {
+	rm -fr ~/download/
+	mkdir download
+	cd download
+	folder_name=$(makefolder_name)
+	mkdir $folder_name
+	mkdir $folder_name/pgpfiles $folder_name/zipfiles $folder_name/csvfiles
+	# go into pgpfiles folder and download from ftp
+	pdownload
+	pcsv
+	s3upload
+}
